@@ -311,7 +311,7 @@ def predict_test(train_data, train_labels, test_data):
 
     # 3) Train a robust, non-linear classifier
     rf = RandomForestClassifier(
-        n_estimators=800,
+        n_estimators=1000,
         max_depth=None,
         min_samples_leaf=2,
         class_weight="balanced",
