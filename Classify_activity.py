@@ -8,7 +8,7 @@ Classify_activity.py while keeping the required predict_test() API.
 """
 
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier
 from sklearn.preprocessing import StandardScaler
 
 # Order of sensor axes in the input data:
@@ -78,6 +78,108 @@ def _extract_features(data):
     return features
 
 
+def _extract_ecdf_features(data, percentiles=(1, 5, 10, 25, 50, 75, 90, 95, 99)):
+    N, T, D = data.shape
+    q = np.percentile(data, percentiles, axis=1)
+    q = np.moveaxis(q, 0, -1)
+    quant_flat = q.reshape(N, -1)
+    p_index = {p: i for i, p in enumerate(percentiles)}
+    q1 = q[..., p_index[1]]
+    q5 = q[..., p_index[5]]
+    q10 = q[..., p_index[10]]
+    q25 = q[..., p_index[25]]
+    q50 = q[..., p_index[50]]
+    q75 = q[..., p_index[75]]
+    q90 = q[..., p_index[90]]
+    q95 = q[..., p_index[95]]
+    q99 = q[..., p_index[99]]
+    d1 = (q95 - q5).reshape(N, -1)
+    d2 = (q75 - q25).reshape(N, -1)
+    d3 = (q50 - q25).reshape(N, -1)
+    d4 = (q75 - q50).reshape(N, -1)
+    d5 = (q99 - q1).reshape(N, -1)
+    d6 = (q90 - q10).reshape(N, -1)
+    features = np.hstack([quant_flat, d1, d2, d3, d4, d5, d6])
+    return features
+
+
+def _extract_magnitude_features(data, percentiles=(1, 5, 10, 25, 50, 75, 90, 95, 99)):
+    N, T, D = data.shape
+    acc = data[:, :, :3]
+    gyr = data[:, :, 3:]
+    acc_mag = np.linalg.norm(acc, axis=2)
+    gyr_mag = np.linalg.norm(gyr, axis=2)
+    def feats_from_series(series):
+        mean = np.mean(series, axis=1, keepdims=True)
+        std = np.std(series, axis=1, keepdims=True)
+        median = np.median(series, axis=1, keepdims=True)
+        q25 = np.percentile(series, 25, axis=1).reshape(N, 1)
+        q75 = np.percentile(series, 75, axis=1).reshape(N, 1)
+        iqr = q75 - q25
+        energy = np.mean(series ** 2, axis=1, keepdims=True)
+        abs_mean = np.mean(np.abs(series), axis=1, keepdims=True)
+        t = np.arange(T)
+        t_centered = t - t.mean()
+        series_centered = series - mean
+        slope = (np.sum(series_centered * t_centered[np.newaxis, :], axis=1) / np.sum(t_centered ** 2)).reshape(N, 1)
+        q = np.percentile(series, percentiles, axis=1)
+        q = np.moveaxis(q, 0, -1)
+        p_index = {p: i for i, p in enumerate(percentiles)}
+        q1s = q[..., p_index[1]].reshape(N, 1)
+        q5s = q[..., p_index[5]].reshape(N, 1)
+        q10s = q[..., p_index[10]].reshape(N, 1)
+        q25s = q[..., p_index[25]].reshape(N, 1)
+        q50s = q[..., p_index[50]].reshape(N, 1)
+        q75s = q[..., p_index[75]].reshape(N, 1)
+        q90s = q[..., p_index[90]].reshape(N, 1)
+        q95s = q[..., p_index[95]].reshape(N, 1)
+        q99s = q[..., p_index[99]].reshape(N, 1)
+        d1 = q95s - q5s
+        d2 = q75s - q25s
+        d3 = q50s - q25s
+        d4 = q75s - q50s
+        d5 = q99s - q1s
+        d6 = q90s - q10s
+        quant_flat = q.reshape(N, -1)
+        return np.hstack([mean, std, median, iqr, energy, abs_mean, slope, quant_flat, d1, d2, d3, d4, d5, d6])
+    acc_feats = feats_from_series(acc_mag)
+    gyr_feats = feats_from_series(gyr_mag)
+    return np.hstack([acc_feats, gyr_feats])
+
+
+def _pairwise_corr_features(data):
+    N, T, D = data.shape
+    acc = data[:, :, :3]
+    gyr = data[:, :, 3:]
+    def corr_pairs(block):
+        x = block[:, :, 0]
+        y = block[:, :, 1]
+        z = block[:, :, 2]
+        def corr(a, b):
+            ma = a.mean(axis=1, keepdims=True)
+            mb = b.mean(axis=1, keepdims=True)
+            ac = a - ma
+            bc = b - mb
+            cov = np.mean(ac * bc, axis=1)
+            sa = a.std(axis=1) + 1e-8
+            sb = b.std(axis=1) + 1e-8
+            return (cov / (sa * sb)).reshape(N, 1)
+        return np.hstack([corr(x, y), corr(x, z), corr(y, z)])
+    acc_corr = corr_pairs(acc)
+    gyr_corr = corr_pairs(gyr)
+    return np.hstack([acc_corr, gyr_corr])
+
+
+def _extract_rich_features(data):
+    base = _extract_features(data)
+    ecdf = _extract_ecdf_features(data)
+    mag = _extract_magnitude_features(data)
+    corr = _pairwise_corr_features(data)
+    return np.hstack([base, ecdf, mag, corr])
+
+
+
+
 def _smooth_predictions(preds, window_size=5):
     """
     Apply a simple temporal smoothing (majority filter) over predictions.
@@ -122,6 +224,55 @@ def _smooth_predictions(preds, window_size=5):
     return smoothed
 
 
+def _smooth_proba(proba, classes, window_size=5):
+    n = proba.shape[0]
+    if window_size <= 1 or n == 0:
+        return classes[np.argmax(proba, axis=1)]
+    half = window_size // 2
+    out = np.empty(n, dtype=classes.dtype)
+    for i in range(n):
+        start = max(0, i - half)
+        end = min(n, i + half + 1)
+        avg = proba[start:end].mean(axis=0)
+        out[i] = classes[np.argmax(avg)]
+    return out
+
+
+def _estimate_hmm(train_labels, classes, alpha=1.0):
+    K = classes.shape[0]
+    idx = {c: i for i, c in enumerate(classes)}
+    pi = np.full(K, alpha)
+    for c in train_labels:
+        pi[idx[c]] += 1.0
+    pi = pi / pi.sum()
+    trans = np.full((K, K), alpha)
+    for i in range(len(train_labels) - 1):
+        a = idx[train_labels[i]]
+        b = idx[train_labels[i + 1]]
+        trans[a, b] += 1.0
+    trans = trans / trans.sum(axis=1, keepdims=True)
+    return pi, trans
+
+
+def _viterbi_decode(proba, pi, trans, classes):
+    n, K = proba.shape
+    log_pi = np.log(pi + 1e-12)
+    log_trans = np.log(trans + 1e-12)
+    log_em = np.log(proba + 1e-12)
+    dp = np.empty((n, K))
+    back = np.zeros((n, K), dtype=int)
+    dp[0] = log_pi + log_em[0]
+    for t in range(1, n):
+        prev = dp[t - 1][:, None] + log_trans
+        back[t] = np.argmax(prev, axis=0)
+        dp[t] = log_em[t] + np.max(prev, axis=0)
+    path = np.empty(n, dtype=int)
+    path[-1] = np.argmax(dp[-1])
+    for t in range(n - 2, -1, -1):
+        path[t] = back[t + 1, path[t + 1]]
+    return classes[path]
+
+
 def predict_test(train_data, train_labels, test_data):
     """
     Train a classifier on train_data / train_labels and predict labels for
@@ -150,8 +301,8 @@ def predict_test(train_data, train_labels, test_data):
         Predicted activity labels for the test set.
     """
     # 1) Feature extraction
-    train_features = _extract_features(train_data)
-    test_features = _extract_features(test_data)
+    train_features = _extract_rich_features(train_data)
+    test_features = _extract_rich_features(test_data)
 
     # 2) Standardize features (fit on training data only)
     scaler = StandardScaler()
@@ -160,18 +311,20 @@ def predict_test(train_data, train_labels, test_data):
 
     # 3) Train a robust, non-linear classifier
     rf = RandomForestClassifier(
-        n_estimators=300,
-        max_depth=16,
+        n_estimators=800,
+        max_depth=None,
         min_samples_leaf=2,
         class_weight="balanced",
         n_jobs=-1,
         random_state=42,
     )
     rf.fit(train_features_std, train_labels)
-    raw_preds = rf.predict(test_features_std)
-
-    # 4) Temporal smoothing of predictions
-    test_outputs = _smooth_predictions(raw_preds, window_size=5)
+    proba = rf.predict_proba(test_features_std)
+    pi, trans = _estimate_hmm(train_labels, rf.classes_, alpha=2.0)
+    lam = 0.3
+    trans = (1 - lam) * trans + lam * np.eye(trans.shape[0])
+    path = _viterbi_decode(proba, pi, trans, rf.classes_)
+    test_outputs = _smooth_predictions(path, window_size=3)
 
     return test_outputs
 
@@ -210,6 +363,27 @@ if __name__ == "__main__":
         macro_f1 = f1_score(test_labels, test_outputs, average="macro")
         print(f"Micro-averaged F1 score: {micro_f1:.4f}")
         print(f"Macro-averaged F1 score: {macro_f1:.4f}")
+
+        train_features2 = _extract_ecdf_features(train_data)
+        test_features2 = _extract_ecdf_features(test_data)
+        scaler2 = StandardScaler()
+        train_std2 = scaler2.fit_transform(train_features2)
+        test_std2 = scaler2.transform(test_features2)
+        rf2 = RandomForestClassifier(
+            n_estimators=500,
+            max_depth=24,
+            min_samples_leaf=2,
+            class_weight="balanced",
+            n_jobs=-1,
+            random_state=42,
+        )
+        rf2.fit(train_std2, train_labels)
+        proba2 = rf2.predict_proba(test_std2)
+        proba_smooth = _smooth_proba(proba2, rf2.classes_, window_size=5)
+        micro_f1_proba = f1_score(test_labels, proba_smooth, average="micro")
+        macro_f1_proba = f1_score(test_labels, proba_smooth, average="macro")
+        print(f"Micro F1 (proba smoothing): {micro_f1_proba:.4f}")
+        print(f"Macro F1 (proba smoothing): {macro_f1_proba:.4f}")
 
         # Plot predictions vs. true labels
         n_test = test_labels.size
