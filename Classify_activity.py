@@ -391,11 +391,26 @@ def predict_test(train_data, train_labels, test_data):
         n_jobs=-1,
         random_state=42,
     )
-    calib = CalibratedClassifierCV(rf, cv=3, method="isotonic")
-    calib.fit(train_features_std, train_labels)
-    proba = calib.predict_proba(test_features_std)
-    pi, trans = _estimate_hmm(train_labels, calib.classes_, alpha=2.0)
-    mins = _estimate_min_durations(train_labels, calib.classes_)
+    n_train = train_features_std.shape[0]
+    split_idx = max(1, int(0.8 * n_train))
+    if split_idx >= n_train:
+        split_idx = n_train - 1
+    X_fit = train_features_std[:split_idx]
+    y_fit = train_labels[:split_idx]
+    X_calib = train_features_std[split_idx:]
+    y_calib = train_labels[split_idx:]
+    rf.fit(X_fit, y_fit)
+    use_calib = (X_calib.shape[0] >= 10) and (np.unique(y_calib).size >= 2)
+    if use_calib:
+        calib = CalibratedClassifierCV(rf, cv="prefit", method="isotonic")
+        calib.fit(X_calib, y_calib)
+        proba = calib.predict_proba(test_features_std)
+        classes = calib.classes_
+    else:
+        proba = rf.predict_proba(test_features_std)
+        classes = rf.classes_
+    pi, trans = _estimate_hmm(train_labels, classes, alpha=2.0)
+    mins = _estimate_min_durations(train_labels, classes)
     row_lam = np.clip(0.1 + 0.02 * mins, 0.1, 0.6)
     for r in range(trans.shape[0]):
         lr = row_lam[r]
@@ -404,8 +419,8 @@ def predict_test(train_data, train_labels, test_data):
         s = trans[r].sum()
         if s > 0:
             trans[r] /= s
-    path = _viterbi_decode(proba, pi, trans, calib.classes_)
-    path = _enforce_min_duration(path, proba, calib.classes_, mins, max_passes=2)
+    path = _viterbi_decode(proba, pi, trans, classes)
+    path = _enforce_min_duration(path, proba, classes, mins, max_passes=2)
     test_outputs = _smooth_predictions(path, window_size=5)
 
     return test_outputs
