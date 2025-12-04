@@ -9,6 +9,7 @@ Classify_activity.py while keeping the required predict_test() API.
 
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.preprocessing import StandardScaler
 
 # Order of sensor axes in the input data:
@@ -175,7 +176,8 @@ def _extract_rich_features(data):
     ecdf = _extract_ecdf_features(data)
     mag = _extract_magnitude_features(data)
     corr = _pairwise_corr_features(data)
-    return np.hstack([base, ecdf, mag, corr])
+    diff = _extract_diff_features(data)
+    return np.hstack([base, ecdf, mag, corr, diff])
 
 
 
@@ -273,6 +275,77 @@ def _viterbi_decode(proba, pi, trans, classes):
     return classes[path]
 
 
+def _extract_diff_features(data, percentiles=(1, 5, 10, 25, 50, 75, 90, 95, 99)):
+    N, T, D = data.shape
+    diff = np.abs(np.diff(data, axis=1))
+    mean_d = diff.mean(axis=1)
+    std_d = diff.std(axis=1)
+    q = np.percentile(diff, percentiles, axis=1)
+    q = np.moveaxis(q, 0, -1)
+    quant_flat = q.reshape(N, -1)
+    return np.hstack([mean_d, std_d, quant_flat])
+
+
+def _estimate_min_durations(train_labels, classes):
+    idx = {c: i for i, c in enumerate(classes)}
+    n = train_labels.shape[0]
+    mins = np.full(classes.shape[0], 2, dtype=int)
+    i = 0
+    segs = {c: [] for c in classes}
+    while i < n:
+        c = train_labels[i]
+        j = i
+        while j < n and train_labels[j] == c:
+            j += 1
+        segs[c].append(j - i)
+        i = j
+    for c in classes:
+        arr = np.array(segs[c], dtype=float)
+        if arr.size > 0:
+            med = np.median(arr)
+            mins[idx[c]] = max(2, int(np.floor(med / 3)))
+    return mins
+
+
+def _enforce_min_duration(path, proba, classes, min_durations, max_passes=2):
+    n = path.shape[0]
+    idx = {c: i for i, c in enumerate(classes)}
+    out = path.copy()
+    for _ in range(max_passes):
+        changed = False
+        i = 0
+        while i < n:
+            c = out[i]
+            j = i
+            while j < n and out[j] == c:
+                j += 1
+            seg_len = j - i
+            mlen = min_durations[idx[c]]
+            if seg_len < mlen:
+                left_label = out[i - 1] if i - 1 >= 0 else None
+                right_label = out[j] if j < n else None
+                best_label = None
+                best_score = -1.0
+                if left_label is not None:
+                    li = idx[left_label]
+                    score = proba[i:j, li].mean()
+                    if score > best_score:
+                        best_score = score
+                        best_label = left_label
+                if right_label is not None:
+                    ri = idx[right_label]
+                    score = proba[i:j, ri].mean()
+                    if score > best_score:
+                        best_score = score
+                        best_label = right_label
+                if best_label is None:
+                    best_label = c
+                out[i:j] = best_label
+                changed = True
+            i = j
+        if not changed:
+            break
+    return out
 def predict_test(train_data, train_labels, test_data):
     """
     Train a classifier on train_data / train_labels and predict labels for
@@ -318,13 +391,22 @@ def predict_test(train_data, train_labels, test_data):
         n_jobs=-1,
         random_state=42,
     )
-    rf.fit(train_features_std, train_labels)
-    proba = rf.predict_proba(test_features_std)
-    pi, trans = _estimate_hmm(train_labels, rf.classes_, alpha=2.0)
-    lam = 0.3
-    trans = (1 - lam) * trans + lam * np.eye(trans.shape[0])
-    path = _viterbi_decode(proba, pi, trans, rf.classes_)
-    test_outputs = _smooth_predictions(path, window_size=3)
+    calib = CalibratedClassifierCV(rf, cv=3, method="isotonic")
+    calib.fit(train_features_std, train_labels)
+    proba = calib.predict_proba(test_features_std)
+    pi, trans = _estimate_hmm(train_labels, calib.classes_, alpha=2.0)
+    mins = _estimate_min_durations(train_labels, calib.classes_)
+    row_lam = np.clip(0.1 + 0.02 * mins, 0.1, 0.6)
+    for r in range(trans.shape[0]):
+        lr = row_lam[r]
+        trans[r] = (1 - lr) * trans[r]
+        trans[r, r] += lr
+        s = trans[r].sum()
+        if s > 0:
+            trans[r] /= s
+    path = _viterbi_decode(proba, pi, trans, calib.classes_)
+    path = _enforce_min_duration(path, proba, calib.classes_, mins, max_passes=2)
+    test_outputs = _smooth_predictions(path, window_size=5)
 
     return test_outputs
 
@@ -398,5 +480,5 @@ if __name__ == "__main__":
         plt.tight_layout()
         plt.show()
     except OSError:
-        # CSV files not found; skip the debug run.
         print("CSV files not found; skipping __main__ debug run.")
+
