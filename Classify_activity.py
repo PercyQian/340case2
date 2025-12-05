@@ -1,12 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-Improved activity recognition classifier using richer handcrafted features
-and a Random Forest classifier, plus temporal smoothing of predictions.
-
-This file is intended to replace the original logistic-regression demo in
-Classify_activity.py while keeping the required predict_test() API.
-"""
-
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier
 from sklearn.calibration import CalibratedClassifierCV
@@ -18,19 +10,7 @@ sensor_names = ['Acc_x', 'Acc_y', 'Acc_z', 'Gyr_x', 'Gyr_y', 'Gyr_z']
 
 
 def _extract_features(data):
-    """
-    Extract handcrafted features from raw IMU data.
-
-    Parameters
-    ----------
-    data : np.ndarray of shape (n_samples, 60, 6)
-        Raw time-series for each 1-minute window.
-
-    Returns
-    -------
-    features : np.ndarray of shape (n_samples, n_features)
-        Handcrafted feature vectors for each example.
-    """
+    
     # data: (N, T=60, D=6)
     N, T, D = data.shape
     # Basic statistics per axis
@@ -183,21 +163,7 @@ def _extract_rich_features(data):
 
 
 def _smooth_predictions(preds, window_size=5):
-    """
-    Apply a simple temporal smoothing (majority filter) over predictions.
-
-    Parameters
-    ----------
-    preds : np.ndarray of shape (n_samples,)
-        Discrete label predictions.
-    window_size : int, optional
-        Size of the smoothing window (must be odd). Default is 5.
-
-    Returns
-    -------
-    smoothed : np.ndarray of shape (n_samples,)
-        Smoothed label sequence.
-    """
+   
     n = preds.shape[0]
     if window_size <= 1 or n == 0:
         return preds
@@ -347,32 +313,7 @@ def _enforce_min_duration(path, proba, classes, min_durations, max_passes=2):
             break
     return out
 def predict_test(train_data, train_labels, test_data):
-    """
-    Train a classifier on train_data / train_labels and predict labels for
-    test_data.
-
-    This implementation:
-      1. Extracts a richer set of handcrafted features from each 1-minute
-         window for all 6 sensor axes.
-      2. Standardizes the feature space using only the training set.
-      3. Trains a Random Forest classifier with class balancing.
-      4. Applies a simple temporal smoothing over the sequence of
-         predicted labels to respect activity continuity over time.
-
-    Parameters
-    ----------
-    train_data : np.ndarray of shape (n_train, 60, 6)
-        Training IMU data.
-    train_labels : np.ndarray of shape (n_train,)
-        Integer activity labels in {1, 2, 3, 4}.
-    test_data : np.ndarray of shape (n_test, 60, 6)
-        Test IMU data.
-
-    Returns
-    -------
-    test_outputs : np.ndarray of shape (n_test,)
-        Predicted activity labels for the test set.
-    """
+    
     # 1) Feature extraction
     train_features = _extract_rich_features(train_data)
     test_features = _extract_rich_features(test_data)
