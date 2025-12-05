@@ -3,7 +3,6 @@ Project Overview
 Task: Human Activity Recognition (HAR) using smartphone Inertial Measurement Unit (IMU) data.
 
 
-
 Goal: Classify 1-minute time windows into one of 4 physical tasks.
 
 Classes (Labels):
